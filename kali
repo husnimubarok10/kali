@@ -122,7 +122,13 @@ update_bootkali_env() {
     return 2
   fi
 
+
+
+
+
   if grep -q '^MNT=' "$ENV_FILE"; then
+    jalanin_root "$KILL"
+    RC=$?
     sed -i "s|^MNT=.*|MNT=\"$lokasi\"|" "$ENV_FILE"
   else
     echo "MNT=\"$lokasi\"" >> "$ENV_FILE"
