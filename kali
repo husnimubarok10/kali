@@ -25,7 +25,7 @@ _resolve_path() {
 }
 
 SCRIPT_PATH=$(_resolve_path "$0")
-SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+SCRIPT_DIR=$(dirname "$SCRIPT_PATH")/scripts/
 BOOT="$SCRIPT_DIR/bootkali"
 KILL="$SCRIPT_DIR/killkali"
 ENV_FILE="$SCRIPT_DIR/bootkali_env"
