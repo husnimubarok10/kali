@@ -1,0 +1,138 @@
+#!/system/bin/sh
+# Shebang: jalankan script menggunakan shell Android (/system/bin/sh)
+
+SCRIPT_PATH=$(readlink -f $0)                      # Ambil path absolut dari script ini
+. ${SCRIPT_PATH%/*}/bootkali_log                     # Source file bootkali_log (fungsi bklog untuk logging)
+. ${SCRIPT_PATH%/*}/bootkali_env                     # Source file bootkali_env (variabel lingkungan seperti MNT, BUSYBOX)
+
+#################################
+#### DEFINE GLOBAL VARIABLES ####
+#################################
+
+## Validate busybox path.
+if [ -z "$BUSYBOX" ]; then
+    bklog "[-] No busybox_nh is installed or busybox is not granted execute permission, if you did have it installed, please symlink it to /system/bin and grant it the permission." # Jika BUSYBOX kosong -> busybox_nh tidak ditemukan atau tidak executable
+    exit 1 # Keluar karena perlu busybox untuk operasi mount/umount
+fi
+
+## Validate kali Chroot path.
+if [ ! -d "$MNT" ]; then
+    bklog "[-] \"$MNT\" directory not exist!" # Jika direktori chroot tidak ada -> error
+    bklog "[!] Click the button [INSTALL KALI CHROOT] down below now!" # Instruksi agar user meng-install chroot
+    exit 2
+fi
+if [ -z "$MNT" ]; then
+    bklog "[-] The \$MNT variable is not defined, please run nethunter app first." # Jika variabel MNT belum diset -> minta jalankan aplikasi nethunter
+    exit 2
+fi
+
+isAllunmounted=0 # Flag untuk menandai apakah semua filesystem berhasil di-unmount
+
+##########################
+#### DEFINE FUNCTIONS ####
+##########################
+
+########## Kill all running kali services and processes ##########
+f_kill_pids() {
+    bklog "[!] Killing all running kali services .." # Log awal
+    local lsof_full=$($BUSYBOX lsof | awk '{print $1}' | grep -c '^lsof') # Cek versi output lsof (apakah kolom pertama adalah 'lsof')
+    if [ "${lsof_full}" -eq 0 ]; then
+        local pids=$($BUSYBOX lsof | grep "$MNT" | awk '{print $1}' | uniq) # Ambil PID/kolom sesuai output lsof
+    else
+        local pids=$($BUSYBOX lsof | grep "$MNT" | awk '{print $2}' | uniq) # Alternatif kolom jika format berbeda
+    fi
+    if [ -n "${pids}" ]; then
+        kill -9 ${pids} 2> /dev/null # Paksa hentikan proses yang berhubungan dengan chroot
+        return $? # Kembalikan status kill
+    fi
+    return 0 # Tidak ada proses untuk dihentikan
+}
+
+########## Restore the setup ##########
+f_restore_setup() {
+    bklog "[!] Restoring the setup to previous state.." # Log awal restore
+
+    ## set shmmax to 128mb to free memory ##
+    $BUSYBOX sysctl -w kernel.shmmax=134217728 # Turunkan kernel.shmmax ke 128MB untuk membebaskan memori bersama
+
+    ## remove all the remaining chroot vnc session pid and log files..##
+    bklog "[!] Removing all the remaining chroot vnc session pid and log files.." # Log
+    rm -rf $MNT/tmp/.X11* $MNT/tmp/.X*-lock $MNT/root/.vnc/*.pid $MNT/root/.vnc/*.log > /dev/null 2>&1 # Hapus file PID dan log VNC yang tersisa
+}
+
+########## umount the fs one by one ##########
+f_umount_fs() {
+    if $BUSYBOX mountpoint -q $MNT/$1; then
+        if $BUSYBOX umount -l "$MNT/$1" || $BUSYBOX umount -f "$MNT/$1"; then
+            bklog "[+] umounted $MNT/$1" # Jika berhasil unmount (lazy atau force)
+            if [ ! "$1" = "dev/pts" -a ! "$1" = "dev/shm" ]; then
+                if rm -rf $MNT/$1; then
+                    bklog "[+] removed $MNT/$1" # Hapus direktori mount kecuali dev/pts dan dev/shm
+                else
+                    bklog "[-] Failed to remove $MNT/$1" # Gagal hapus -> set flag
+                    isAllunmounted=1
+                fi
+            fi
+        else
+            bklog "[-] failed to umounted $MNT/$1" # Gagal unmount
+            isAllunmounted=1
+        fi
+    else
+        if [ -d $MNT/$1 ]; then
+            bklog "[+] $MNT/$1 is unmounted already." # Jika bukan mountpoint tapi direktori ada
+            if rm -rf $MNT/$1; then
+                bklog "[+] removed $MNT/$1" # Hapus direktori
+            else
+                bklog "[-] Failed to remove $MNT/$1" # Gagal hapus
+                isAllunmounted=1
+            fi
+        fi
+    fi
+}
+
+########## umount if chroot directory is NOT a mountpoint(directory method) ##########
+f_dir_umount() {
+    $BUSYBOX sync # Flush filesystem buffers
+    f_kill_pids # Hentikan proses yang pake chroot
+    f_restore_setup # Restore konfigurasi seperti shmmax dan hapus file VNC
+    bklog "[!] Removing all fs mounts.." # Log
+    FS=(dev/pts dev/shm dev proc sys system sdcard) # Daftar filesystem yang akan di-unmount
+    for i in "${FS[@]}"; do
+        f_umount_fs "$i" # Panggil fungsi unmount per item
+    done
+}
+
+########## Check if chroot directory is a mountpoint ##########
+f_is_mntpoint() {
+    if [ -d "$MNT" ]; then
+        $BUSYBOX mountpoint -q "$MNT" && return 0 # Jika MNT adalah mountpoint -> return 0
+        return 1 # Jika MNT ada tapi bukan mountpoint -> return 1
+    fi
+}
+
+###################
+#### MAIN PART ####
+###################
+
+f_is_mntpoint # Cek apakah $MNT adalah mountpoint
+res=$?
+case $res in
+1)
+    bklog "[!] $MNT is NOT a mountpoint" # Jika bukan mountpoint
+    f_dir_umount # Jalankan metode unmount berdasarkan direktori
+    ;;
+*)
+    bklog "[!] $MNT directory is not existed!!! Aborting.." # Jika MNT tidak ada sama sekali
+    exit 1
+esac
+
+if [ -z "$(cat /proc/mounts | grep $MNT)" ]; then
+    bklog "[+] All done." # Jika tidak ada entry di /proc/mounts -> semua sudah ter-unmount
+    isAllunmounted=0
+else
+    bklog "[-] there are still mounted points not unmounted yet." # Masih ada mount yang tersisa
+    bklog "[-] Try run this script again and see if they can be unmounted now." # Saran: jalankan lagi
+    isAllunmounted=1
+fi
+
+return $isAllunmounted # Kembalikan status (0 jika sukses, 1 jika masih ada sisa)

@@ -1,0 +1,198 @@
+#!/system/bin/sh
+# Shebang: jalankan script menggunakan shell Android (/system/bin/sh)
+
+SCRIPT_PATH=$(readlink -f $0) # Ambil path absolut dari script ini
+. ${SCRIPT_PATH%/*}/bootkali_log # Source file log (fungsi bklog)
+ . ${SCRIPT_PATH%/*}/bootkali_env # Source file environment (variabel MNT, BUSYBOX, dll)
+
+## Validate busybox path.
+if [ -z "$BUSYBOX" ]; then
+    bklog "[-] busybox nggak ada / permission kurang"
+    exit 1 # Keluar dengan kode 1
+fi
+
+## Validate kali Chroot path.
+if [ -z "$MNT" ]; then
+    bklog "[-] MNT belum didefinisikan, folder kali tidak ada" 
+    exit 2
+fi
+
+if [ ! -d "$MNT" ]; then
+    bklog "[-] direktori MNT nggak ada" 
+    bklog "[!] Download dulu FS kalinya!" # Pesan instruksi instalasi
+    exit 2
+fi
+
+##########################
+#### DEFINE FUNCTIONS ####
+##########################
+
+######### CHECK IF WORKING CHROOT DIR EXISTS #########
+f_chk_chroot() {
+    [ ! -d $MNT ] && bklog "[-] $MNT directory is not found." && return 1 # Cek apakah direktori chroot ada
+    [ ! -f $MNT$CHROOT_EXEC ] && bklog "[-] $CHROOT_EXEC not found." && return 1 # Cek file executable chroot
+    if ! $BUSYBOX chroot $MNT /bin/uname; then
+        bklog "[-] No chroot file exists." # Coba jalankan uname di dalam chroot, kalau gagal berarti chroot korup/tidak lengkap
+        return 1
+    fi
+    return 0 # Semua pengecekan sukses
+}
+
+######### CHECK IF FS IS ALL MOUNTED ALREADY #########
+f_isAllReady(){
+    local FS
+    FS=(proc sys dev dev/pts system sdcard) # Daftar filesystem yang harus dipasang
+    for i in "${FS[@]}"; do
+        if [ "$(grep $MNT/$i /proc/mounts)" ]; then
+            bklog "[+] $i was mounted already." # Kalau entry ada di /proc/mounts -> sudah mounted
+            continue
+        else
+            bklog "[-] fs is NOT all mounted yet." # Kalau ada yang belum -> belum siap
+            return 1
+        fi
+    done
+    [ ! -e "/dev/net/tun" ] && return 1 # Pastikan tun device ada
+    [ ! -e "/dev/fd" -o ! -e "/dev/stdin" -o ! -e "/dev/stdout" -o ! -e "/dev/stderr" ] && return 1 # Pastikan fd/std* tersedia
+    bklog "[+] The Kali chroot has been started already." && return 0 # Semua sudah terpasang
+}
+
+######### MOUNT SDCARD #########
+
+f_mount_sdcard() {
+    if [ -d "$MNT/sdcard" ]; then
+        $BUSYBOX mountpoint -q "$MNT/sdcard" && return 0 # Kalau sudah mountpoint -> selesai
+        rm -rf $MNT/sdcard # Hapus folder kalau bukan mountpoint
+    fi
+    mkdir -p $MNT/sdcard # Buat folder sdcard di chroot
+    for sdcard in \
+        "$EXTERNAL_STORAGE" \
+        /storage/emulated/0 \
+        /storage/emulated/legacy \
+        /storage/sdcard0 \
+        /sdcard
+    do
+        [ -d "$sdcard" ] &&
+            $BUSYBOX mount -o bind "$sdcard" "$MNT/sdcard" && bklog "[+] mounted sdcard" &&
+                return 0 # Coba beberapa path storage Android dan bind ke chroot
+    done
+    return 1 # Gagal mount sdcard
+}
+
+######### [ MOUNTING AND BINDING FILESYSTEM ] #########
+f_mount_fs_to_kali() {
+
+    $BUSYBOX mount -o remount,suid /data # Remount /data dengan suid untuk kebutuhan tertentu
+    $BUSYBOX chmod +s $MNT$CHROOT_EXEC # Tambahkan bit setuid pada executable chroot
+
+    ######### SET FD, Thanks @feefik and @zer0conf ########
+    if [ ! -e "/dev/fd" -o ! -e "/dev/stdin" -o ! -e "/dev/stdout" -o ! -e "/dev/stderr" ]; then
+        [ -e "/dev/fd" ] || ln -s /proc/self/fd /dev/ && bklog "[+] linked /proc/self/fd to /dev/" # Link /proc/self/fd kalau belum ada
+        [ -e "/dev/stdin" ] || ln -s /proc/self/fd/0 /dev/stdin && bklog "[+] linked /proc/self/fd/0 to /dev/stdin" # Link stdin
+        [ -e "/dev/stdout" ] || ln -s /proc/self/fd/1 /dev/stdout && bklog "[+] linked /proc/self/fd/1 to /dev/stdout" # Link stdout
+        [ -e "/dev/stderr" ] || ln -s /proc/self/fd/2 /dev/stderr && bklog "[+] linked /proc/self/fd/2 to /dev/stderr" # Link stderr
+    fi
+
+    ######### SET TUN ########
+    if [ ! -e "/dev/net/tun" ]; then
+        [ ! -d "/dev/net" ] && mkdir -p /dev/net # Buat /dev/net jika belum ada
+        mknod /dev/net/tun c 10 200 && bklog "[+] created /dev/net/tun" # Buat device node tun (character device major 10 minor 200)
+    fi
+
+    ######### SET DEV ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/dev 2> /dev/null | grep 'is a')" ]; then
+        [ -d $MNT/dev ] && rm -rf $MNT/dev # Hapus kalau folder dev ada tapi bukan mountpoint
+        [ ! -d $MNT/dev ] && mkdir -p $MNT/dev # Buat direktori dev di chroot
+        $BUSYBOX mount -o bind /dev $MNT/dev && bklog "[+] mounted /dev" # Bind /dev dari host ke chroot
+    fi
+
+    ######### SET DEV PTS ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/dev/pts 2> /dev/null | grep 'is a')" ]; then
+        $BUSYBOX mount -t devpts devpts $MNT/dev/pts && bklog "[+] mounted /dev/pts" # Mount devpts ke chroot untuk pseudo-tty
+    fi
+
+    ######### SET DEV SHM ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/dev/shm 2> /dev/null | grep 'is a')" ]; then
+        [ ! -d $MNT/dev/shm ] && mkdir -p $MNT/dev/shm # Buat folder /dev/shm jika perlu
+        $BUSYBOX mount -o rw,nosuid,nodev,mode=1777 -t tmpfs tmpfs $MNT/dev/shm && bklog "[+] mounted /dev/shm" # Mount tmpfs untuk shared memory
+    fi
+
+    ######### SET PROC ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/proc 2> /dev/null | grep 'is a')" ]; then
+        [ -d $MNT/proc ] && rm -rf $MNT/proc # Hapus kalau ada tapi bukan mountpoint
+        [ ! -d $MNT/proc ] && mkdir -p $MNT/proc
+        $BUSYBOX mount -t proc proc $MNT/proc && bklog "[+] mounted /proc" # Mount proc filesystem
+    fi
+
+    ######### SET SYS ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/sys 2> /dev/null | grep 'is a')" ]; then
+        [ -d $MNT/sys ] && rm -rf $MNT/sys
+        [ ! -d $MNT/sys ] && mkdir -p $MNT/sys
+        $BUSYBOX mount -t sysfs sys $MNT/sys && bklog "[+] mounted /sys" # Mount sysfs
+    fi
+
+    ######### SET SYSTEM ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/system 2> /dev/null | grep 'is a')" ]; then
+        [ -d $MNT/system ] && rm -rf $MNT/system
+        [ ! -d $MNT/system ] && mkdir -p $MNT/system
+        $BUSYBOX mount -o bind /system $MNT/system && bklog "[+] mounted /system" # Bind /system Android ke chroot
+    fi
+
+    ######### SET BINDERFS ########
+    if [ ! "$( $BUSYBOX mountpoint $MNT/dev/binderfs 2> /dev/null | grep 'is a')" ]; then
+        [ ! -d $MNT/dev/binderfs ] && mkdir -p $MNT/dev/binderfs # Buat folder binderfs
+        $BUSYBOX mount -r -o bind /dev/binderfs $MNT/dev/binderfs && bklog "[+] mounted /dev/binderfs" # Bind binderfs (read-only)
+    fi
+
+    ######### SET INTERNAL SDCARD #########
+    f_mount_sdcard # Panggil fungsi mount sdcard
+
+    ######### SET 250MB TO ALLOW POSTGRESQL #########
+    $BUSYBOX sysctl -w kernel.shmmax=268435456 # Atur shmmax ke ~256MB supaya PostgreSQL bisa jalan
+
+    ######### SET DNS ########
+    > $MNT/etc/resolv.conf # Kosongkan file resolv.conf di chroot dulu
+    for i in 1 2 3 4; do
+        if [ -z "$(getprop net.dns${i})" ]; then
+            # kita periksa 1-4 dns yang tersedia, break jika kosong
+            break
+        else
+            # tambahkan DNS dari device Android ke resolv.conf chroot
+            echo "nameserver $(getprop net.dns${i})" >> $MNT/etc/resolv.conf
+        fi
+    done
+
+    # lastly add two default dns entries
+    echo "nameserver 208.67.222.222" >> $MNT/etc/resolv.conf # OpenDNS primary
+    echo "nameserver 208.67.220.220" >> $MNT/etc/resolv.conf # OpenDNS secondary
+    chmod 644 $MNT/etc/resolv.conf # Set permissions agar dapat dibaca
+
+    ######### SET NETWORK AND HOSTNAME ########
+    $BUSYBOX sysctl -w net.ipv4.ip_forward=1 # Aktifkan IP forwarding
+    echo "127.0.0.1		 localhost kali" > $MNT/etc/hosts # Set hosts file lokal
+    echo "::1			 localhost ip6-localhost ip6-loopback" >> $MNT/etc/hosts # IPv6 loopback
+    echo "kali" > $MNT/proc/sys/kernel/hostname # Set hostname chroot jadi 'kali'
+
+    ######### Setup done #########
+    bklog "[+] The Kali chroot has been started." # Log sukses
+}
+
+################################
+########## MAIN PART ###########
+################################
+
+######### First to check if chroot directory exists #########
+bklog "[!] Checking chroot environment." # Log awal pengecekan
+f_chk_chroot
+RES=$?
+if [ $RES -eq 1 ]; then
+    bklog "[-] Please check again. Aborted." # Kalau pengecekan chroot gagal -> abort
+    exit 1
+fi
+
+## Lastly check if all Filesystems are mounted.
+f_isAllReady
+RES=$?
+if [ $RES -eq 1 ]; then
+    bklog "[!] Mounting fs to kali chroot." # Kalau belum semua ter-mount -> jalankan mounting
+    f_mount_fs_to_kali
+fi

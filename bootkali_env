@@ -1,0 +1,53 @@
+#!/system/bin/sh
+# Shebang: jalankan script menggunakan shell Android (/system/bin/sh)
+
+##########################################################################
+#### DEFINE GLOBAL ENVIRONMENT VARIABLES FOR ALL NETHUNTER APP SCRIPT ####
+##########################################################################
+
+unset LD_PRELOAD # Hapus LD_PRELOAD untuk mencegah preload library yang mengganggu chroot/net hunter
+
+## Define the nethunter app package name.
+APP_PGK_NAME=com.offsec.nethunter # Nama package NetHunter (digunakan untuk path internal aplikasi)
+
+## Define the root directory path of chroot containers
+NHSYSTEM_PATH="/data/local/nhsystem/" # Lokasi root untuk semua chroot NetHunter
+
+## Define chroot sudo path
+CHROOT_EXEC=/usr/bin/sudo # Path ke executable sudo yang dipakai untuk masuk chroot
+
+## Combine android $PATH to kali chroot $PATH
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH # Tambahkan path standar Kali ke PATH sekarang
+
+## Define busybox path.
+BUSYBOX=`which busybox_nh | head -n1` # Coba cari busybox_nh di PATH
+if [ -z "$BUSYBOX" ]; then
+    if [ -x "/system/xbin/busybox_nh" ]; then
+        BUSYBOX="/system/xbin/busybox_nh" # Jika ada di /system/xbin
+    elif [ -x "/system/bin/busybox_nh" ]; then
+        BUSYBOX="/system/bin/busybox_nh" # Jika ada di /system/bin
+    elif [ -x "/data/data/$APP_PGK_NAME/scripts/bin/busybox_nh" ]; then
+        BUSYBOX="/data/data/$APP_PGK_NAME/scripts/bin/busybox_nh" # Jika ada di data aplikasi NetHunter
+    elif [ -x "/data/adb/magisk/busybox" ]; then
+        BUSYBOX="$PREFIX/bin/busybox"
+    #elif [ -x "/data/adb/magisk/busybox" ]; then
+      #  BUSYBOX="/data/adb/magisk/busybox"
+    fi
+fi
+
+## Define the Kali Chroot path.
+
+
+
+MNT="kali-arm64/"
+
+
+
+if [ -d "$MNT" ]; then
+    echo "direktori valid: $MNT"
+else
+    echo "direktori tidak valid atau tidak ada: $MNT"
+    MNT=`readlink -e $NHSYSTEM_PATH/kali-arm64`
+    echo "pakai direktori default : $MNT"
+
+fi
