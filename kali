@@ -4,6 +4,10 @@
 # Jika tidak ada argumen => start
 # Tambah opsi -h/--help (Bahasa Indonesia)
 # Tambah opsi -l "lokasi" untuk MNT (otomatis update bootkali_env)
+#
+# Catatan perubahan:
+# - Skrip TIDAK BOLEH dijalankan langsung sebagai root. Jika dipanggil root -> error dan exit.
+# - Eskalasi ke root hanya dilakukan per-perintah lewat fungsi jalanin_root() (menggunakan 'su').
 
 # --- helper: resolve absolute path ---
 _resolve_path() {
@@ -52,24 +56,11 @@ jalanin_root() {
   return 127
 }
 
-# --- Pastikan root dulu ---
-if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
-  if command -v su >/dev/null 2>&1; then
-    _info "INFO: Script ini perlu dijalankan sebagai root. Mencoba 'su'..."
-    su -c "sh '$SCRIPT_PATH' $*"
-    RC=$?
-    if [ "$RC" -eq 0 ]; then
-      exit 0
-    elif [ "$RC" -eq 127 ]; then
-      _err "ERROR: 'su' tidak tersedia atau akses root ditolak."
-      exit 127
-    else
-      exit $RC
-    fi
-  else
-    _err "ERROR: 'su' tidak ditemukan. Tidak mendapatkan akses root."
-    exit 127
-  fi
+# --- Prevent running as root directly ---
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+  _err "ERROR: Skrip ini tidak boleh dijalankan langsung sebagai root."
+  _err "Jalankan sebagai user biasa; skrip akan otomatis melakukan eskalasi ke root bila perlu (menggunakan 'su')."
+  exit 1
 fi
 
 # --- Parsing argumen ---
@@ -111,7 +102,7 @@ tampil_help() {
   printf "  -h, --help          : Tampilkan panduan ini\n\n"
   printf "Catatan:\n"
   printf "  - File bootkali, killkali, bootkali_env harus berada di folder yang sama dengan skrip ini\n"
-  printf "  - Skrip ini otomatis mencoba 'su' jika dijalankan tanpa root\n"
+  printf "  - Skrip ini harus dijalankan sebagai user biasa; ia akan menggunakan 'su' untuk perintah yang memerlukan root.\n"
 }
 
 # --- Update bootkali_env ---
@@ -122,11 +113,8 @@ update_bootkali_env() {
     return 2
   fi
 
-
-
-
-
   if grep -q '^MNT=' "$ENV_FILE"; then
+    # Hentikan dulu supaya perubahan aman
     jalanin_root "$KILL"
     RC=$?
     sed -i "s|^MNT=.*|MNT=\"$lokasi\"|" "$ENV_FILE"
